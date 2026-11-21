@@ -5,7 +5,9 @@ import json
 import re
 from pathlib import Path
 
-from scope import Source
+from import_guard import Imports
+from scope import Source, rebuild
+from dependencies import Isolated
 
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
 
@@ -51,13 +53,18 @@ class Index:
         self.imported = json.loads(
             gzip.decompress((base / "import_lines.json.gz").read_bytes())
         )
+        self.shared = json.loads(
+            gzip.decompress((base / "shared.json.gz").read_bytes())
+        )
+        self.isolated = Isolated(base)
+        self.imports = Imports()
         self.source = Source()
         self.observers = int((base / "observers.txt").read_text(), 16)
         item_data = json.loads(
             gzip.decompress((base / "item_profiles.json.gz").read_bytes())
         )
         self.item_reads = {k: int(v, 16) for k, v in item_data[0].items()}
-        self.incomplete = sum(1 << i for i in item_data[2])
+        self.incomplete = self.isolated.incomplete | sum(1 << i for i in item_data[2])
         self.calls = {
             p: {(line, name): int(mask, 16) for line, name, mask in rows}
             for p, rows in item_data[3].items()
@@ -119,6 +126,30 @@ class Index:
             | self.observers
             | self.incomplete
         )
+        if mode == "members":
+            members = selected | wide
+            if members == self.all:
+                return members
+            receivers = set()
+            for owner, name, _, _ in spans:
+                receivers.update(self.isolated.startup.get(owner + "." + name, ()))
+            original, _ = self.source.original(old)
+            patched = rebuild(original, change["hunks"])
+            if patched is None or not self.imports.check(
+                old, patched, receivers, self.source.names
+            ):
+                return self.all
+            return members
+        if mode == "deferred":
+            seen = 0
+            for line, end in spans:
+                callers = self.calls.get(old, {}).get((line, "<lambda>"), 0)
+                if not callers:
+                    callers = self.isolated.span(old, line, end)
+                seen |= callers
+            return selected | (seen or wide)
+        if mode == "class-value":
+            return self.all
         if mode == "control":
             return wide | selected
         if mode == "trivia":
@@ -127,17 +158,39 @@ class Index:
         early = self.imported.get(old, ())
         if not rows:
             return wide | selected
+        stable = 0
+        expressions = []
+        if mode == "expressions":
+            spans, expressions, stable = spans
         for lo, hi, first, name in spans:
             cold = self.calls.get(old, {}).get((first, name), 0)
-            selected |= cold
-            if any(lo <= line <= hi for line in early):
-                return wide | selected
+            early_body = any(lo <= line <= hi for line in early)
+            if early_body and not expressions:
+                init_calls = self.isolated.span(old, lo, hi) | cold
+                selected |= init_calls or wide
+                continue
             seen = 0
             for i in set(rows[lo - 1 : hi]):
                 seen |= self.masks[i]
             if not (seen | cold):
                 return wide | selected
-            selected |= seen
+            if not expressions:
+                selected |= seen | cold
+                continue
+            exact = 0
+            for start, end in expressions:
+                if not (lo <= start <= end <= hi):
+                    continue
+                exact |= self.isolated.span(old, start, end)
+                for i in set(rows[start - 1 : end]):
+                    exact |= self.masks[i]
+            can_prune = (
+                stable
+                if not early_body
+                and not any(lo <= line <= hi for line in self.shared.get(old, ()))
+                else 0
+            )
+            selected |= (exact or seen or cold) & ~can_prune
         return selected
 
     def nearby(self, patch):

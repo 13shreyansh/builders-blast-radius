@@ -1,6 +1,9 @@
 """Reconstruct changed source and distinguish function-body edits from structural edits."""
 
 import ast
+from edits import classify_members, deferred, executable
+from equivalence import Comparisons
+from expressions import class_value_edit, matching_spans
 import io
 import re
 import tokenize
@@ -93,6 +96,7 @@ def tokens(source):
 
 class Source:
     def __init__(self):
+        self.comparisons = Comparisons()
         self.archive = ZipFile(Path(__file__).with_name("source.zip"))
         self.names = set(self.archive.namelist())
 
@@ -129,8 +133,17 @@ class Source:
             and tokens(before) == tokens(after)
         ):
             return "trivia", []
+        before_tree, after_tree = ast.parse(before), ast.parse(after)
+        lambdas = deferred(before_tree, after_tree)
+        if lambdas:
+            return "deferred", lambdas
         new = structure(after)
         if old[0] != new[0] or len(old[1]) != len(new[1]):
+            members = classify_members(before_tree, after_tree, path)
+            if members:
+                return "members", members
+            if class_value_edit(before, after):
+                return "class-value", []
             return "structural", []
         spans = []
         for a, b in zip(old[1], new[1]):
@@ -140,4 +153,15 @@ class Source:
                 return "control", []
             if a[2] != b[2]:
                 spans.append((a[0], a[1], a[4], a[5]))
-        return ("bodies", spans) if spans else ("structural", [])
+        if spans:
+            expressions = executable(before_tree, after_tree) or matching_spans(
+                before, after
+            )
+            if expressions:
+                return "expressions", (
+                    spans,
+                    expressions,
+                    self.comparisons.unchanged(path, before, after),
+                )
+            return "bodies", spans
+        return "structural", []

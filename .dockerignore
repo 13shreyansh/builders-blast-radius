@@ -9,3 +9,13 @@ tools/*
 !tools/build_source.py
 !item_profiles.json.gz
 !observers.txt
+!expressions.py
+!equivalence.py
+!operands.json.gz
+!shared.json.gz
+!edits.py
+!dependencies.py
+!cold_lines.json.gz
+!class_usage.json.gz
+!import_guard.py
+!tools/build_import_archive.py
