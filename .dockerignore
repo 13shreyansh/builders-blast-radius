@@ -18,4 +18,9 @@ tools/*
 !cold_lines.json.gz
 !class_usage.json.gz
 !import_guard.py
+!namespaces.json.gz
 !tools/build_import_archive.py
+!initialization.json.gz
+!types.json.gz
+!class_changes.py
+!shadowed.json.gz

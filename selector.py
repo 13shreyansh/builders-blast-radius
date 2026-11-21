@@ -98,7 +98,7 @@ class Index:
             mask |= self.masks[i]
         return mask or self.all
 
-    def select_file(self, change):
+    def select_file(self, change, compound_python=False):
         old, new = change["old"], change["new"]
         if old != new or not change["hunks"]:
             return self.all
@@ -127,12 +127,20 @@ class Index:
             | self.incomplete
         )
         if mode == "members":
-            members = selected | wide
+            if compound_python:
+                # The initialization probe substitutes a single module in a clean interpreter.
+                return self.all
+            affected, receivers, modules = self.isolated.class_members(old, spans, wide)
+            members = selected | affected
+            for module in modules:
+                members |= self.file_group(module)
+                receivers.add(
+                    module.removesuffix(".py")
+                    .replace("/", ".")
+                    .removesuffix(".__init__")
+                )
             if members == self.all:
                 return members
-            receivers = set()
-            for owner, name, _, _ in spans:
-                receivers.update(self.isolated.startup.get(owner + "." + name, ()))
             original, _ = self.source.original(old)
             patched = rebuild(original, change["hunks"])
             if patched is None or not self.imports.check(
@@ -206,8 +214,9 @@ class Index:
     def select(self, patch):
         changes = parse_patch(patch)
         mask = 0 if changes else self.all
+        compound_python = sum(change["old"].endswith(".py") for change in changes) > 1
         for change in changes:
-            mask |= self.select_file(change)
+            mask |= self.select_file(change, compound_python)
         selected = self.unmeasured.copy()
         while mask:
             lowest = mask & -mask

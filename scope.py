@@ -1,6 +1,9 @@
 """Reconstruct changed source and distinguish function-body edits from structural edits."""
 
 import ast
+import gzip
+import json
+from class_changes import class_data_changes
 from edits import classify_members, deferred, executable
 from equivalence import Comparisons
 from expressions import class_value_edit, matching_spans
@@ -96,6 +99,13 @@ def tokens(source):
 
 class Source:
     def __init__(self):
+        self.shadowed = set(
+            json.loads(
+                gzip.decompress(
+                    Path(__file__).with_name("shadowed.json.gz").read_bytes()
+                )
+            )
+        )
         self.comparisons = Comparisons()
         self.archive = ZipFile(Path(__file__).with_name("source.zip"))
         self.names = set(self.archive.namelist())
@@ -140,6 +150,9 @@ class Source:
         new = structure(after)
         if old[0] != new[0] or len(old[1]) != len(new[1]):
             members = classify_members(before_tree, after_tree, path)
+            if members:
+                return "members", members
+            members = class_data_changes(before_tree, after_tree, path, self.shadowed)
             if members:
                 return "members", members
             if class_value_edit(before, after):
