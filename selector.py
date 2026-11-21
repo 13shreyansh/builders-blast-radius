@@ -91,6 +91,8 @@ class Index:
         if mode in ("invalid","unknown","structural"):
             return self.all
         selected = self.reads.get(old,0) | self.by_file.get(old,0) | self.observers | self.incomplete
+        if mode == "control":
+            return wide | selected
         if mode == "trivia":
             return selected
         rows = self.rows.get(old,())

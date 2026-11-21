@@ -46,7 +46,9 @@ class Functions(ast.NodeTransformer):
         body_text = "".join(self.lines[node.lineno-1:hi])
         # Accessing a function's docstring has no enclosing call context.
         first = min((d.lineno for d in node.decorator_list),default=node.lineno)
-        self.bodies.append((lo,hi,body_text,ast.get_docstring(node,clean=False),first,node.name))
+        # A new control-flow path may invoke code the original suite never called.
+        control = tuple(type(child).__name__ for child in ast.walk(node) if isinstance(child, ast.stmt))
+        self.bodies.append((lo,hi,body_text,ast.get_docstring(node,clean=False),first,node.name,control))
         node.body = [ast.Pass()]
         return node
 
@@ -99,6 +101,8 @@ class Source:
         for a,b in zip(old[1],new[1]):
             if a[3] != b[3]:
                 return "structural", []
+            if a[6] != b[6]:
+                return "control", []
             if a[2] != b[2]:
                 spans.append((a[0],a[1],a[4],a[5]))
         return ("bodies",spans) if spans else ("structural",[])

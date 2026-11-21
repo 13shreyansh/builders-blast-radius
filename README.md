@@ -2,7 +2,7 @@
 
 This regression-test selector analyzes independent patches against SQLGlot revision `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`. It reconstructs patched Python files in memory. Changes to imports, class settings, signatures and other module structure select the whole manifest. Added, removed, invalid and unrecognized files also select the whole manifest.
 
-For a change inside an existing function, the selector combines whole-function line coverage with calls observed when each test starts in its own interpreter. Fixture setup and teardown count for every test sharing that fixture's scope. Source-reading tests are included for Python edits. Data changes select measured readers, including subprocesses and shared setup. Any manifest test absent from the measurements is selected.
+For a change inside an existing function, the selector combines whole-function line coverage with calls observed when each test starts in its own interpreter. When the statement structure changes, the selector also includes every test group that loaded the changed file. Fixture setup and teardown count for every test sharing that fixture's scope. Source-reading tests are included for Python edits. Data changes select measured readers, including subprocesses and shared setup. Any manifest test absent from the measurements is selected.
 
 The scheduler tries one to eight workers. It uses the manifest's integer-millisecond durations and charges two seconds per worker. Build with `docker build --platform linux/amd64 -t blast-radius .` and mount the manifest at `/data/tests.json` and the patches at `/data/commits`.
 
