@@ -1,4 +1,5 @@
 """Select regression tests from the clean checkout's observed dependencies."""
+
 import gzip
 import json
 import re
@@ -26,27 +27,41 @@ def parse_patch(text):
                     current["hunks"][-1][2].append(line)
             elif line.startswith(("--- ", "+++ ")):
                 name = line[4:].split("\t", 1)[0]
-                current["old" if line.startswith("---") else "new"] = name[2:] if name.startswith(("a/", "b/")) else name
+                current["old" if line.startswith("---") else "new"] = (
+                    name[2:] if name.startswith(("a/", "b/")) else name
+                )
             elif line.startswith(("rename from ", "rename to ")):
                 old = line.startswith("rename from ")
-                current["old" if old else "new"] = line[len("rename from " if old else "rename to "):]
+                current["old" if old else "new"] = line[
+                    len("rename from " if old else "rename to ") :
+                ]
     return files
 
 
 class Index:
     def __init__(self, tests):
-        payload = json.loads(gzip.decompress(Path(__file__).with_name("dependencies.json.gz").read_bytes()))
+        payload = json.loads(
+            gzip.decompress(
+                Path(__file__).with_name("dependencies.json.gz").read_bytes()
+            )
+        )
         base = Path(__file__).parent
         raw, _ = json.loads(gzip.decompress((base / "file_reads.json.gz").read_bytes()))
-        self.file_reads = {k:int(v,16) for k,v in raw.items()}
-        self.imported = json.loads(gzip.decompress((base / "import_lines.json.gz").read_bytes()))
+        self.file_reads = {k: int(v, 16) for k, v in raw.items()}
+        self.imported = json.loads(
+            gzip.decompress((base / "import_lines.json.gz").read_bytes())
+        )
         self.source = Source()
-        self.observers = int((base / "observers.txt").read_text(),16)
-        item_data = json.loads(gzip.decompress((base / "item_profiles.json.gz").read_bytes()))
-        self.item_reads = {k:int(v,16) for k,v in item_data[0].items()}
-        self.incomplete = sum(1<<i for i in item_data[2])
-        self.calls = {p:{(line,name):int(mask,16) for line,name,mask in rows}
-                      for p,rows in item_data[3].items()}
+        self.observers = int((base / "observers.txt").read_text(), 16)
+        item_data = json.loads(
+            gzip.decompress((base / "item_profiles.json.gz").read_bytes())
+        )
+        self.item_reads = {k: int(v, 16) for k, v in item_data[0].items()}
+        self.incomplete = sum(1 << i for i in item_data[2])
+        self.calls = {
+            p: {(line, name): int(mask, 16) for line, name, mask in rows}
+            for p, rows in item_data[3].items()
+        }
         self.ids = payload["ids"]
         self.rows = payload["lines"]
         self.masks = [int(mask, 16) for mask in payload["masks"]]
@@ -67,50 +82,69 @@ class Index:
         self.all = (1 << len(self.ids)) - 1
 
     def file_group(self, path):
-        mask = self.file_reads.get(path, 0) | self.reads.get(path,0) | self.by_file.get(path,0)
-        for i in set(self.rows.get(path,())):
+        mask = (
+            self.file_reads.get(path, 0)
+            | self.reads.get(path, 0)
+            | self.by_file.get(path, 0)
+        )
+        for i in set(self.rows.get(path, ())):
             mask |= self.masks[i]
         return mask or self.all
 
     def select_file(self, change):
-        old,new = change["old"],change["new"]
+        old, new = change["old"], change["new"]
         if old != new or not change["hunks"]:
             return self.all
         wide = self.file_group(old)
         if not old.endswith(".py"):
-            cold = self.item_reads.get(old,0)
+            cold = self.item_reads.get(old, 0)
             if not cold:
                 return wide
-            direct = cold | self.reads.get(old,0)
-            grouped = self.file_reads.get(old,0)
+            direct = cold | self.reads.get(old, 0)
+            grouped = self.file_reads.get(old, 0)
             for module_mask in self.by_file.values():
                 if module_mask & grouped and not module_mask & direct:
                     direct |= module_mask
             return direct | self.incomplete
         mode, spans = self.source.classify(change)
-        if mode in ("invalid","unknown","structural"):
+        if mode in ("invalid", "unknown", "structural"):
             return self.all
-        selected = self.reads.get(old,0) | self.by_file.get(old,0) | self.observers | self.incomplete
+        selected = (
+            self.reads.get(old, 0)
+            | self.by_file.get(old, 0)
+            | self.observers
+            | self.incomplete
+        )
         if mode == "control":
             return wide | selected
         if mode == "trivia":
             return selected
-        rows = self.rows.get(old,())
-        early = self.imported.get(old,())
+        rows = self.rows.get(old, ())
+        early = self.imported.get(old, ())
         if not rows:
             return wide | selected
-        for lo,hi,first,name in spans:
-            cold = self.calls.get(old,{}).get((first,name),0)
+        for lo, hi, first, name in spans:
+            cold = self.calls.get(old, {}).get((first, name), 0)
             selected |= cold
             if any(lo <= line <= hi for line in early):
                 return wide | selected
             seen = 0
-            for i in set(rows[lo-1:hi]):
+            for i in set(rows[lo - 1 : hi]):
                 seen |= self.masks[i]
             if not (seen | cold):
                 return wide | selected
             selected |= seen
         return selected
+
+    def nearby(self, patch):
+        related = 0
+        for change in parse_patch(patch):
+            related |= self.file_group(change["old"])
+        return {
+            number
+            for position, number in self.by_number.items()
+            if (related >> position) & 1
+        }
 
     def select(self, patch):
         changes = parse_patch(patch)
@@ -152,13 +186,38 @@ def schedule(numbers, durations, fixed=None):
     return [w for w in best if w]
 
 
+def fill_slack(workers, durations, names, nearby):
+    if not workers:
+        return
+    loads = [sum(durations[n] for n in group) for group in workers]
+    deadline = max(loads)
+    if min(loads) == deadline:
+        return
+    waiting = set(durations).difference(n for group in workers for n in group)
+    order = sorted(waiting, key=lambda n: (n not in nearby, -durations[n], names[n]))
+    worker = loads.index(min(loads))
+    for n in order:
+        if loads[worker] + durations[n] <= deadline:
+            workers[worker].append(n)
+            loads[worker] += durations[n]
+            worker = loads.index(min(loads))
+            if loads[worker] == deadline:
+                break
+
+
 def run(data):
     tests = json.loads((data / "tests.json").read_bytes())["tests"]
     durations = {t["number"]: round(t["seconds"] * 1000) for t in tests}
+    names = {t["number"]: t["id"] for t in tests}
     index = Index(tests)
     for path in sorted((data / "commits").glob("*.patch")):
-        workers = schedule(index.select(path.read_text(errors="replace")), durations)
-        print(json.dumps({"commit": path.stem, "workers": workers}, separators=(",", ":")))
+        patch = path.read_text(errors="replace")
+        workers = schedule(index.select(patch), durations)
+        if len(workers) > 1 and sum(map(len, workers)) < len(tests):
+            fill_slack(workers, durations, names, index.nearby(patch))
+        print(
+            json.dumps({"commit": path.stem, "workers": workers}, separators=(",", ":"))
+        )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 """Reconstruct changed source and distinguish function-body edits from structural edits."""
+
 import ast
 import io
 import re
@@ -35,20 +36,39 @@ def rebuild(source, hunks):
 
 
 class Functions(ast.NodeTransformer):
-    def __init__(self,source):
+    def __init__(self, source):
         self.lines = source.splitlines(keepends=True)
         self.bodies = []
 
-    def visit_FunctionDef(self,node):
+    def visit_FunctionDef(self, node):
         first_statement = node.body[0]
-        lo = min([first_statement.lineno, *(d.lineno for d in getattr(first_statement,"decorator_list",()))])
+        lo = min(
+            [
+                first_statement.lineno,
+                *(d.lineno for d in getattr(first_statement, "decorator_list", ())),
+            ]
+        )
         hi = node.end_lineno
-        body_text = "".join(self.lines[node.lineno-1:hi])
+        body_text = "".join(self.lines[node.lineno - 1 : hi])
         # Accessing a function's docstring has no enclosing call context.
-        first = min((d.lineno for d in node.decorator_list),default=node.lineno)
+        first = min((d.lineno for d in node.decorator_list), default=node.lineno)
         # A new control-flow path may invoke code the original suite never called.
-        control = tuple(type(child).__name__ for child in ast.walk(node) if isinstance(child, ast.stmt))
-        self.bodies.append((lo,hi,body_text,ast.get_docstring(node,clean=False),first,node.name,control))
+        control = tuple(
+            type(child).__name__
+            for child in ast.walk(node)
+            if isinstance(child, ast.stmt)
+        )
+        self.bodies.append(
+            (
+                lo,
+                hi,
+                body_text,
+                ast.get_docstring(node, clean=False),
+                first,
+                node.name,
+                control,
+            )
+        )
         node.body = [ast.Pass()]
         return node
 
@@ -63,8 +83,12 @@ def structure(source):
 
 
 def tokens(source):
-    ignored = {tokenize.COMMENT,tokenize.NL,tokenize.ENDMARKER}
-    return [(t.type,t.string) for t in tokenize.generate_tokens(io.StringIO(source).readline) if t.type not in ignored]
+    ignored = {tokenize.COMMENT, tokenize.NL, tokenize.ENDMARKER}
+    return [
+        (t.type, t.string)
+        for t in tokenize.generate_tokens(io.StringIO(source).readline)
+        if t.type not in ignored
+    ]
 
 
 class Source:
@@ -73,36 +97,47 @@ class Source:
         self.names = set(self.archive.namelist())
 
     @lru_cache(maxsize=24)
-    def original(self,path):
+    def original(self, path):
         text = self.archive.read(path).decode()
         return text, structure(text)
 
-    def classify(self,change):
+    def classify(self, change):
         path = change["old"]
         if path not in self.names or path != change["new"] or not change["hunks"]:
             return "unknown", []
         before, old = self.original(path)
-        after = rebuild(before,change["hunks"])
+        after = rebuild(before, change["hunks"])
         if after is None:
             return "unknown", []
         try:
-            compile(after,path,"exec",dont_inherit=True)
-        except (SyntaxError,ValueError,OverflowError):
+            compile(after, path, "exec", dont_inherit=True)
+        except (SyntaxError, ValueError, OverflowError):
             return "invalid", []
-        if CODING.findall("".join(before.splitlines(keepends=True)[:2])) != CODING.findall("".join(after.splitlines(keepends=True)[:2])):
+        if CODING.findall(
+            "".join(before.splitlines(keepends=True)[:2])
+        ) != CODING.findall("".join(after.splitlines(keepends=True)[:2])):
             return "unknown", []
-        edits = [line[1:] for _,_,body in change["hunks"] for line in body if line[0] in "+-"]
-        if edits and all(not s.strip() or s.lstrip().startswith("#") for s in edits) and tokens(before)==tokens(after):
+        edits = [
+            line[1:]
+            for _, _, body in change["hunks"]
+            for line in body
+            if line[0] in "+-"
+        ]
+        if (
+            edits
+            and all(not s.strip() or s.lstrip().startswith("#") for s in edits)
+            and tokens(before) == tokens(after)
+        ):
             return "trivia", []
         new = structure(after)
         if old[0] != new[0] or len(old[1]) != len(new[1]):
             return "structural", []
         spans = []
-        for a,b in zip(old[1],new[1]):
+        for a, b in zip(old[1], new[1]):
             if a[3] != b[3]:
                 return "structural", []
             if a[6] != b[6]:
                 return "control", []
             if a[2] != b[2]:
-                spans.append((a[0],a[1],a[4],a[5]))
-        return ("bodies",spans) if spans else ("structural",[])
+                spans.append((a[0], a[1], a[4], a[5]))
+        return ("bodies", spans) if spans else ("structural", [])
