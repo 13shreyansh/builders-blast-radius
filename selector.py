@@ -69,6 +69,17 @@ class Index:
             p: {(line, name): int(mask, 16) for line, name, mask in rows}
             for p, rows in item_data[3].items()
         }
+        metadata, startup = json.loads(
+            gzip.decompress((base / "source_observers.json.gz").read_bytes())
+        )
+        self.metadata_startup = set(startup)
+        self.metadata = {path: int(mask, 16) for path, mask in metadata.items()}
+        traced = 0
+        for mask in self.metadata.values():
+            traced |= mask
+        self.unresolved_metadata = self.observers & (
+            ~traced | self.metadata.get("*", 0)
+        )
         self.ids = payload["ids"]
         self.rows = payload["lines"]
         self.masks = [int(mask, 16) for mask in payload["masks"]]
@@ -98,7 +109,9 @@ class Index:
             mask |= self.masks[i]
         return mask or self.all
 
-    def select_file(self, change, compound_python=False):
+    def select_file(
+        self, change, compound_python=False, classified=None, together=None
+    ):
         old, new = change["old"], change["new"]
         if old != new or not change["hunks"]:
             return self.all
@@ -114,21 +127,31 @@ class Index:
                     direct |= module_mask
             return direct | self.incomplete
         try:
-            mode, spans = self.source.classify(change)
+            mode, spans = classified or self.source.classify(change)
         except RecursionError:
             # Valid diffs can exceed the recursion limit in Python's compiler or AST visitor.
             return self.all
         if mode in ("invalid", "unknown", "structural"):
             return self.all
+        if mode == "members":
+            metadata = self.observers
+        else:
+            metadata = self.unresolved_metadata | (
+                self.observers & self.metadata.get(old, 0)
+            )
+        if mode == "defaults":
+            if old in self.metadata_startup:
+                return self.all
+            metadata |= self.metadata.get(old, 0) | self.metadata.get("*", 0)
         selected = (
             self.reads.get(old, 0)
             | self.by_file.get(old, 0)
-            | self.observers
+            | metadata
             | self.incomplete
         )
         if mode == "members":
-            if compound_python:
-                # The initialization probe substitutes a single module in a clean interpreter.
+            if compound_python and not together:
+                # Mixed executable changes retain the full import fallback.
                 return self.all
             affected, receivers, modules = self.isolated.class_members(old, spans, wide)
             members = selected | affected
@@ -144,7 +167,7 @@ class Index:
             original, _ = self.source.original(old)
             patched = rebuild(original, change["hunks"])
             if patched is None or not self.imports.check(
-                old, patched, receivers, self.source.names
+                old, patched, receivers, self.source.names, together
             ):
                 return self.all
             return members
@@ -168,11 +191,15 @@ class Index:
             return wide | selected
         stable = 0
         expressions = []
-        if mode == "expressions":
+        if mode in ("expressions", "anchors"):
             spans, expressions, stable = spans
         for lo, hi, first, name in spans:
             cold = self.calls.get(old, {}).get((first, name), 0)
             early_body = any(lo <= line <= hi for line in early)
+            if mode in ("defaults", "anchors"):
+                shared = any(lo <= line <= hi for line in self.shared.get(old, ()))
+                if early_body or shared or compound_python:
+                    return self.all if mode == "defaults" else wide | selected
             if early_body and not expressions:
                 init_calls = self.isolated.span(old, lo, hi) | cold
                 selected |= init_calls or wide
@@ -214,9 +241,36 @@ class Index:
     def select(self, patch):
         changes = parse_patch(patch)
         mask = 0 if changes else self.all
-        compound_python = sum(change["old"].endswith(".py") for change in changes) > 1
+        python = [c for c in changes if c["old"].endswith(".py")]
+        classifications = {}
+        together = None
+        active = python
+        if len(python) > 1:
+            try:
+                classifications = {id(c): self.source.classify(c) for c in python}
+            except RecursionError:
+                mask = self.all
+            if classifications:
+                active = [c for c in python if classifications[id(c)][0] != "trivia"]
+                if (
+                    1 < len(active) <= 3
+                    and len({c["old"] for c in active}) == len(active)
+                    and all(classifications[id(c)][0] == "members" for c in active)
+                ):
+                    together = {}
+                    overlap = self.all
+                    for change in active:
+                        path = change["old"]
+                        source = rebuild(self.source.original(path)[0], change["hunks"])
+                        if source is None:
+                            return list(self.by_number.values()) + self.unmeasured
+                        together[path] = source
+                        overlap &= self.file_group(path)
+                    mask |= overlap
         for change in changes:
-            mask |= self.select_file(change, compound_python)
+            mask |= self.select_file(
+                change, len(active) > 1, classifications.get(id(change)), together
+            )
         selected = self.unmeasured.copy()
         while mask:
             lowest = mask & -mask

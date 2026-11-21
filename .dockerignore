@@ -24,3 +24,6 @@ tools/*
 !types.json.gz
 !class_changes.py
 !shadowed.json.gz
+!callables.py
+!source_observers.json.gz
+!symbols.json.gz

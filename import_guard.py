@@ -15,18 +15,26 @@ def smoke():
     import resource
 
     resource.setrlimit(resource.RLIMIT_CPU, (4, 4))
-    path, source, packages, is_package = json.load(sys.stdin)
+    sources, packages = json.load(sys.stdin)
     base = Path(__file__).resolve().parent
     cache = base / f"import-{sys.version_info.major}{sys.version_info.minor}.zip"
     root = cache if cache.is_file() else base / "source.zip"
     sys.path.insert(0, str(root))
-    name = path.removesuffix(".py").replace("/", ".").removesuffix(".__init__")
-    seen = []
+    edits = {
+        path.removesuffix(".py").replace("/", ".").removesuffix(".__init__"): (
+            path,
+            source,
+        )
+        for path, source in sources
+    }
+    seen = set()
 
     class Changed(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         def find_spec(self, fullname, search, target=None):
-            if fullname != name:
+            if fullname not in edits:
                 return None
+            path = edits[fullname][0]
+            is_package = path.endswith("/__init__.py")
             spec = importlib.util.spec_from_loader(
                 fullname, self, is_package=is_package
             )
@@ -37,18 +45,18 @@ def smoke():
             return spec
 
         def exec_module(self, module):
+            path, source = edits[module.__name__]
             module.__file__ = str(root) + "/" + path
             exec(
                 compile(source, module.__file__, "exec", dont_inherit=True),
                 module.__dict__,
             )
-            seen.append(name)
+            seen.add(module.__name__)
 
     sys.meta_path.insert(0, Changed())
-    importlib.import_module(name)
-    for module in packages:
+    for module in [*edits, *packages]:
         importlib.import_module(module)
-    return 0 if seen == [name] else 1
+    return 0 if seen == edits.keys() else 1
 
 
 class Imports:
@@ -56,8 +64,9 @@ class Imports:
         self.cache = {}
         self.remaining = 45.0
 
-    def check(self, path, source, receivers, names):
-        cache_key = (path, source, tuple(sorted(receivers)))
+    def check(self, path, source, receivers, names, together=None):
+        sources = tuple(sorted(together.items())) if together else ((path, source),)
+        cache_key = (sources, tuple(sorted(receivers)))
         if cache_key in self.cache:
             return self.cache[cache_key]
         if self.remaining <= 0:
@@ -72,9 +81,7 @@ class Imports:
                     modules.add(".".join(parts))
                     break
                 parts.pop()
-        data = json.dumps(
-            [path, source, sorted(modules), path.endswith("/__init__.py")]
-        ).encode()
+        data = json.dumps([sources, sorted(modules)]).encode()
 
         try:
             result = subprocess.run(

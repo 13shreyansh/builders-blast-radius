@@ -3,6 +3,7 @@
 import ast
 import gzip
 import json
+from callables import execution_anchors, ordinary, same_without_pass, signature_changes
 from class_changes import class_data_changes
 from edits import classify_members, deferred, executable
 from equivalence import Comparisons
@@ -73,6 +74,7 @@ class Functions(ast.NodeTransformer):
                 first,
                 node.name,
                 control,
+                ordinary(node),
             )
         )
         node.body = [ast.Pass()]
@@ -105,6 +107,9 @@ class Source:
                     Path(__file__).with_name("shadowed.json.gz").read_bytes()
                 )
             )
+        )
+        self.symbols = json.loads(
+            gzip.decompress(Path(__file__).with_name("symbols.json.gz").read_bytes())
         )
         self.comparisons = Comparisons()
         self.archive = ZipFile(Path(__file__).with_name("source.zip"))
@@ -149,23 +154,38 @@ class Source:
             return "deferred", lambdas
         new = structure(after)
         if old[0] != new[0] or len(old[1]) != len(new[1]):
+            defaults = signature_changes(ast.parse(before), ast.parse(after))
+            if defaults:
+                return "defaults", defaults
             members = classify_members(before_tree, after_tree, path)
             if members:
                 return "members", members
-            members = class_data_changes(before_tree, after_tree, path, self.shadowed)
+            members = class_data_changes(
+                before_tree, after_tree, path, self.shadowed, self.symbols.get(path, ())
+            )
             if members:
                 return "members", members
             if class_value_edit(before, after):
                 return "class-value", []
             return "structural", []
         spans = []
+        control = False
         for a, b in zip(old[1], new[1]):
             if a[3] != b[3]:
                 return "structural", []
             if a[6] != b[6]:
-                return "control", []
+                if not (a[7] and b[7]):
+                    return "control", []
+                control = True
             if a[2] != b[2]:
                 spans.append((a[0], a[1], a[4], a[5]))
+        if control:
+            if same_without_pass(ast.parse(before), ast.parse(after)):
+                return "trivia", []
+            anchors = execution_anchors(before, after, before_tree, after_tree)
+            if anchors:
+                return "anchors", (spans, anchors, 0)
+            return "control", []
         if spans:
             expressions = executable(before_tree, after_tree) or matching_spans(
                 before, after

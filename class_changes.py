@@ -37,7 +37,7 @@ def passive(node):
     )
 
 
-def passive_dict_change(left, right):
+def passive_dict_change(left, right, symbols):
     # Keep order and content of every executable entry, including dict unpacking.
     def active_entries(node):
         entries = []
@@ -48,10 +48,36 @@ def passive_dict_change(left, right):
                 )
         return entries
 
-    return active_entries(left) == active_entries(right)
+    if active_entries(left) == active_entries(right):
+        return True
+    if len(left.keys) != len(right.keys):
+        return False
+
+    def symbolic(node):
+        return (
+            isinstance(node, (ast.Name, ast.Attribute)) and ast.unparse(node) in symbols
+        )
+
+    available = {ast.dump(v) for v in left.values if symbolic(v)}
+    for old_key, new_key, old_value, new_value in zip(
+        left.keys, right.keys, left.values, right.values
+    ):
+        if old_key is None or new_key is None:
+            if old_key is not new_key or ast.dump(old_value) != ast.dump(new_value):
+                return False
+            continue
+        if ast.dump(old_key) != ast.dump(new_key) and not (
+            passive(old_key) and passive(new_key)
+        ):
+            return False
+        if ast.dump(old_value) != ast.dump(new_value) and not (
+            ast.dump(old_value) in available and ast.dump(new_value) in available
+        ):
+            return False
+    return True
 
 
-def class_data_changes(before, after, path, shadowed):
+def class_data_changes(before, after, path, shadowed, symbols=()):
     """Return old binding spans only when all other executable syntax stays identical."""
     module = path.removesuffix(".py").replace("/", ".").removesuffix(".__init__")
     old, new = bindings(before, module), bindings(after, module)
@@ -73,7 +99,7 @@ def class_data_changes(before, after, path, shadowed):
             if ast.dump(value) == ast.dump(replacement):
                 continue
             if isinstance(value, ast.Dict):
-                if not passive_dict_change(value, replacement):
+                if not passive_dict_change(value, replacement, symbols):
                     continue
             elif not (
                 isinstance(value, (ast.Set, ast.Tuple, ast.List))

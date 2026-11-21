@@ -16,10 +16,11 @@ import sys
 active = ""
 seen = collections.defaultdict(set)
 cache = {}
+whole_namespaces = os.environ.get("BLAST_WHOLE_NAMESPACES") == "1"
 scratch = Path(os.environ["BLAST_NAMESPACE_DIR"])
 
 
-def record(obj):
+def record(obj, key=None):
     cls = obj if isinstance(obj, type) else type(obj)
     if cls not in cache:
         cache[cls] = tuple(
@@ -27,12 +28,15 @@ def record(obj):
             for c in cls.__mro__
             if c.__module__.startswith("sqlglot")
         )
-    seen[active].update(cache[cls])
+    if key is None or whole_namespaces:
+        seen[active].update(cache[cls])
+    else:
+        seen[active].update(name + "." + key for name in cache[cls])
 
 
-def namespace(obj):
+def namespace(obj, key=None):
     value = obj.__dict__
-    record(obj)
+    record(obj, key)
     return value
 
 
@@ -47,16 +51,45 @@ def lookup(fn, obj, *args, **kwargs):
 
 
 class Reads(ast.NodeTransformer):
+    @staticmethod
+    def mark_key(node, key):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "__dict__"
+            and isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+        ):
+            node.namespace_key = key.value
+
+    def visit_Subscript(self, node):
+        self.mark_key(node.value, node.slice)
+        return self.generic_visit(node)
+
+    def visit_Compare(self, node):
+        if len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
+            self.mark_key(node.comparators[0], node.left)
+        return self.generic_visit(node)
+
     def visit_Attribute(self, node):
         self.generic_visit(node)
         if node.attr == "__dict__" and isinstance(node.ctx, ast.Load):
             return ast.copy_location(
-                ast.Call(ast.Name("_blast_namespace", ast.Load()), [node.value], []),
+                ast.Call(
+                    ast.Name("_blast_namespace", ast.Load()),
+                    [node.value, ast.Constant(getattr(node, "namespace_key", None))],
+                    [],
+                ),
                 node,
             )
         return node
 
     def visit_Call(self, node):
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+        ):
+            self.mark_key(node.func.value, node.args[0])
         self.generic_visit(node)
         name = (
             node.func.attr

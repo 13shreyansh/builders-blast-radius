@@ -69,10 +69,19 @@ class Isolated:
             startup.update(self.consumers.get(field, ()))
             receivers.update(startup)
             modules.update(self.modules.get(field, ()))
-            mask |= readers | self.namespace_readers.get(owner, 0)
+            mask |= (
+                readers
+                | self.namespace_readers.get(owner, 0)
+                | self.namespace_readers.get(field, 0)
+            )
             if not readers:
                 unknown = True
-            if startup or owner in self.early_namespaces or name.startswith("_"):
+            if (
+                startup
+                or owner in self.early_namespaces
+                or field in self.early_namespaces
+                or name.startswith("_")
+            ):
                 mask |= self.classes.get(owner, 0)
             for receiver in startup:
                 consumers = self.classes.get(receiver, 0)
