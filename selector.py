@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+from scope import Source
+
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
 
 
@@ -34,6 +36,12 @@ def parse_patch(text):
 class Index:
     def __init__(self, tests):
         payload = json.loads(gzip.decompress(Path(__file__).with_name("dependencies.json.gz").read_bytes()))
+        base = Path(__file__).parent
+        raw, directories = json.loads(gzip.decompress((base / "file_reads.json.gz").read_bytes()))
+        self.file_reads = {k:int(v,16) for k,v in raw.items()}
+        self.directory_reads = {k:int(v,16) for k,v in directories.items()}
+        self.imported = json.loads(gzip.decompress((base / "import_lines.json.gz").read_bytes()))
+        self.source = Source()
         self.ids = payload["ids"]
         self.rows = payload["lines"]
         self.masks = [int(mask, 16) for mask in payload["masks"]]
@@ -53,21 +61,36 @@ class Index:
             self.by_file[path] = self.by_file.get(path, 0) | (1 << i)
         self.all = (1 << len(self.ids)) - 1
 
+    def file_group(self, path):
+        mask = self.file_reads.get(path, 0) | self.reads.get(path,0) | self.by_file.get(path,0)
+        for i in set(self.rows.get(path,())):
+            mask |= self.masks[i]
+        return mask or self.all
+
     def select_file(self, change):
-        old, new = change["old"], change["new"]
-        selected = self.reads.get(old, 0) | self.reads.get(new, 0)
-        if old in self.by_file:
-            selected |= self.by_file[old]
-        if old not in self.rows:
-            if old in self.reads or new in self.reads:
-                return selected
+        old,new = change["old"],change["new"]
+        if old != new or not change["hunks"]:
             return self.all
-        rows = self.rows[old]
-        if not change["hunks"] or new == "/dev/null":
+        wide = self.file_group(old)
+        if not old.endswith(".py"):
+            return wide
+        mode, spans = self.source.classify(change)
+        if mode in ("invalid","unknown"):
             return self.all
-        for start, count, body in change["hunks"]:
-            for value in rows[max(0, start - 1):max(start, start + count - 1)]:
-                selected |= self.masks[value]
+        if mode == "structural":
+            return wide
+        selected = self.reads.get(old,0) | self.by_file.get(old,0)
+        if mode == "trivia":
+            return selected
+        rows = self.rows.get(old,())
+        early = self.imported.get(old,())
+        if not rows:
+            return wide
+        for lo,hi in spans:
+            if any(lo <= line <= hi for line in early):
+                return wide
+            for i in set(rows[lo-1:hi]):
+                selected |= self.masks[i]
         return selected
 
     def select(self, patch):

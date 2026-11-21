@@ -1,3 +1,9 @@
 *
 !selector.py
+!scope.py
 !dependencies.json.gz
+!file_reads.json.gz
+!import_lines.json.gz
+!tools/
+tools/*
+!tools/build_source.py
