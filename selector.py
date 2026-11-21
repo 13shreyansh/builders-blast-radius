@@ -106,7 +106,11 @@ class Index:
                 if module_mask & grouped and not module_mask & direct:
                     direct |= module_mask
             return direct | self.incomplete
-        mode, spans = self.source.classify(change)
+        try:
+            mode, spans = self.source.classify(change)
+        except RecursionError:
+            # Valid diffs can exceed the recursion limit in Python's compiler or AST visitor.
+            return self.all
         if mode in ("invalid", "unknown", "structural"):
             return self.all
         selected = (
