@@ -40,11 +40,13 @@ class Functions(ast.NodeTransformer):
         self.bodies = []
 
     def visit_FunctionDef(self,node):
-        lo = node.body[0].lineno
+        first_statement = node.body[0]
+        lo = min([first_statement.lineno, *(d.lineno for d in getattr(first_statement,"decorator_list",()))])
         hi = node.end_lineno
-        body_text = "".join(self.lines[lo-1:hi])
+        body_text = "".join(self.lines[node.lineno-1:hi])
         # Accessing a function's docstring has no enclosing call context.
-        self.bodies.append((lo,hi,body_text,ast.get_docstring(node,clean=False)))
+        first = min((d.lineno for d in node.decorator_list),default=node.lineno)
+        self.bodies.append((lo,hi,body_text,ast.get_docstring(node,clean=False),first,node.name))
         node.body = [ast.Pass()]
         return node
 
@@ -98,5 +100,5 @@ class Source:
             if a[3] != b[3]:
                 return "structural", []
             if a[2] != b[2]:
-                spans.append(a[:2])
+                spans.append((a[0],a[1],a[4],a[5]))
         return ("bodies",spans) if spans else ("structural",[])

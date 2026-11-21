@@ -2,6 +2,7 @@
 import argparse
 import collections
 import concurrent.futures
+from contextlib import contextmanager
 import gzip
 import json
 import multiprocessing.util
@@ -14,6 +15,7 @@ import sys
 import coverage
 from coverage.numbits import numbits_to_nums
 import pytest
+from _pytest.fixtures import FixtureDef
 
 PIN = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
 active = ""
@@ -63,16 +65,39 @@ def covered_job(nodeid, fn, args, kwargs):
 
 
 class Tests:
-    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
-    def pytest_runtest_protocol(self, item, nextitem):
+    @contextmanager
+    def context(self,name):
         global active
-        active = item.nodeid
-        self.parent.switch_context(active)
+        previous = active
+        active = name
+        self.parent.switch_context(name)
         try:
             yield
         finally:
-            active = ""
-            self.parent.switch_context("")
+            active = previous
+            self.parent.switch_context(previous)
+
+    def pytest_collection_finish(self,session):
+        nodes = [item.nodeid for item in session.items]
+        (Path(os.environ["BLAST_MAP_DIR"])/"collected.json").write_text(json.dumps(nodes))
+
+    @pytest.hookimpl(hookwrapper=True,tryfirst=True)
+    def pytest_runtest_protocol(self,item,nextitem):
+        with self.context(item.nodeid):
+            yield
+
+    @contextmanager
+    def fixture(self,fixturedef,request):
+        if fixturedef.scope == "function":
+            yield
+        else:
+            with self.context("@scope:" + request.node.nodeid):
+                yield
+
+    @pytest.hookimpl(hookwrapper=True,tryfirst=True)
+    def pytest_fixture_setup(self,fixturedef,request):
+        with self.fixture(fixturedef,request):
+            yield
 
 
 def measure(tree, scratch):
@@ -94,8 +119,14 @@ def measure(tree, scratch):
 
     concurrent.futures.ProcessPoolExecutor.submit = submit_job
     sys.addaudithook(trace_reads)
+    finish = FixtureDef.finish
+    def scoped_finish(fixturedef,request):
+        with plugin.fixture(fixturedef,request):
+            return finish(fixturedef,request)
+    FixtureDef.finish = scoped_finish
     plugin.parent.start()
-    result = pytest.main(["tests", "-q", "-p", "pytest_timeout", "--timeout=100"], plugins=[plugin])
+    result = pytest.main(["tests", "-q", "-p", "pytest_timeout", "--timeout=360"], plugins=[plugin])
+    FixtureDef.finish = finish
     plugin.parent.stop()
     plugin.parent.save()
     write_reads("reads-parent")
@@ -110,8 +141,13 @@ def export(tree, scratch, output):
     for path in maps:
         with sqlite3.connect(path) as db:
             contexts.update(row[0] for row in db.execute("select context from context where context != ''"))
-    ids = sorted(contexts)
+    ids = sorted(json.loads((scratch / "collected.json").read_text()))
     bits = {name: 1 << i for i, name in enumerate(ids)}
+    for context in sorted(contexts):
+        if context.startswith("@scope:"):
+            owner = context.removeprefix("@scope:")
+            bits[context] = sum(1 << i for i,node in enumerate(ids)
+                                if not owner or node == owner or node.startswith((owner+"::",owner+"/")))
     for path in maps:
         with sqlite3.connect(path) as db:
             query = """select file.path, context.context, numbits from line_bits

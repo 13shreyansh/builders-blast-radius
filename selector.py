@@ -37,11 +37,16 @@ class Index:
     def __init__(self, tests):
         payload = json.loads(gzip.decompress(Path(__file__).with_name("dependencies.json.gz").read_bytes()))
         base = Path(__file__).parent
-        raw, directories = json.loads(gzip.decompress((base / "file_reads.json.gz").read_bytes()))
+        raw, _ = json.loads(gzip.decompress((base / "file_reads.json.gz").read_bytes()))
         self.file_reads = {k:int(v,16) for k,v in raw.items()}
-        self.directory_reads = {k:int(v,16) for k,v in directories.items()}
         self.imported = json.loads(gzip.decompress((base / "import_lines.json.gz").read_bytes()))
         self.source = Source()
+        self.observers = int((base / "observers.txt").read_text(),16)
+        item_data = json.loads(gzip.decompress((base / "item_profiles.json.gz").read_bytes()))
+        self.item_reads = {k:int(v,16) for k,v in item_data[0].items()}
+        self.incomplete = sum(1<<i for i in item_data[2])
+        self.calls = {p:{(line,name):int(mask,16) for line,name,mask in rows}
+                      for p,rows in item_data[3].items()}
         self.ids = payload["ids"]
         self.rows = payload["lines"]
         self.masks = [int(mask, 16) for mask in payload["masks"]]
@@ -73,24 +78,36 @@ class Index:
             return self.all
         wide = self.file_group(old)
         if not old.endswith(".py"):
-            return wide
+            cold = self.item_reads.get(old,0)
+            if not cold:
+                return wide
+            direct = cold | self.reads.get(old,0)
+            grouped = self.file_reads.get(old,0)
+            for module_mask in self.by_file.values():
+                if module_mask & grouped and not module_mask & direct:
+                    direct |= module_mask
+            return direct | self.incomplete
         mode, spans = self.source.classify(change)
-        if mode in ("invalid","unknown"):
+        if mode in ("invalid","unknown","structural"):
             return self.all
-        if mode == "structural":
-            return wide
-        selected = self.reads.get(old,0) | self.by_file.get(old,0)
+        selected = self.reads.get(old,0) | self.by_file.get(old,0) | self.observers | self.incomplete
         if mode == "trivia":
             return selected
         rows = self.rows.get(old,())
         early = self.imported.get(old,())
         if not rows:
-            return wide
-        for lo,hi in spans:
+            return wide | selected
+        for lo,hi,first,name in spans:
+            cold = self.calls.get(old,{}).get((first,name),0)
+            selected |= cold
             if any(lo <= line <= hi for line in early):
-                return wide
+                return wide | selected
+            seen = 0
             for i in set(rows[lo-1:hi]):
-                selected |= self.masks[i]
+                seen |= self.masks[i]
+            if not (seen | cold):
+                return wide | selected
+            selected |= seen
         return selected
 
     def select(self, patch):

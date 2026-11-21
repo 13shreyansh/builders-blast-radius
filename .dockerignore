@@ -7,3 +7,5 @@
 !tools/
 tools/*
 !tools/build_source.py
+!item_profiles.json.gz
+!observers.txt

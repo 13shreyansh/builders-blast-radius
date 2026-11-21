@@ -11,6 +11,24 @@ prefix = tree + os.sep
 scratch = os.environ["BLAST_READ_LOG"]
 used = set()
 dirs = set()
+calls = set()
+capture_functions = os.environ.get("BLAST_CAPTURE_FUNCTIONS") == "1"
+
+
+def on_start(code, offset):
+    filename = code.co_filename
+    if filename.startswith(prefix):
+        relative = filename[len(prefix):]
+        if relative.startswith(("sqlglot/","tests/")) and code.co_name != "<module>":
+            calls.add((relative,code.co_firstlineno,code.co_name))
+    return sys.monitoring.DISABLE
+
+
+if capture_functions:
+    monitor = sys.monitoring
+    monitor.use_tool_id(monitor.PROFILER_ID,"blast clean test")
+    monitor.register_callback(monitor.PROFILER_ID,monitor.events.PY_START,on_start)
+    monitor.set_events(monitor.PROFILER_ID,monitor.events.PY_START)
 
 
 def normalize(value):
@@ -48,7 +66,10 @@ def flush():
         if path:
             used.add(path)
     with open(os.path.join(scratch,f"{os.getpid()}.json"),"w") as f:
-        json.dump([sorted(used),sorted(dirs)],f)
+        payload = [sorted(used),sorted(dirs)]
+        if capture_functions:
+            payload.append(sorted(calls))
+        json.dump(payload,f,separators=(",",":"))
 
 
 sys.addaudithook(observe)

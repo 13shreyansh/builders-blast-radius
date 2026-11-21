@@ -1,19 +1,27 @@
 # Blast Radius
 
-This selector chooses regression tests for independent changes to SQLGlot revision `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`. It reconstructs each changed Python file and checks whether the edit changes executable code inside an existing function, changes module structure, or prevents compilation. It uses whole-function coverage for body edits. Structural edits use the tests that imported or read the file in fresh processes. Unknown paths and invalid Python select every available test.
+This regression-test selector analyzes independent patches against SQLGlot revision `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`. It reconstructs patched Python files in memory. Changes to imports, class settings, signatures and other module structure select the whole manifest. Added, removed, invalid and unrecognized files also select the whole manifest.
 
-The scheduler tries one to eight workers with the manifest's integer-millisecond durations and two-second worker cost. It emits one JSON object per patch. Build with `docker build --platform linux/amd64 -t blast-radius .` and mount the manifest at `/data/tests.json` and the patch directory at `/data/commits`.
+For a change inside an existing function, the selector combines whole-function line coverage with calls observed when each test starts in its own interpreter. Fixture setup and teardown count for every test sharing that fixture's scope. Source-reading tests are included for Python edits. Data changes select measured readers, including subprocesses and shared setup. Any manifest test absent from the measurements is selected.
+
+The scheduler tries one to eight workers. It uses the manifest's integer-millisecond durations and charges two seconds per worker. Build with `docker build --platform linux/amd64 -t blast-radius .` and mount the manifest at `/data/tests.json` and the patches at `/data/commits`.
 
 ## Rebuilding the maps
 
-Use a clean checkout at the pinned revision and the organizer's locked test dependencies, plus coverage.py 7.17.4. Each scratch directory must be new.
+Use a clean checkout at the pinned revision with Python 3.12 or later, the organizer's locked test dependencies and coverage.py 7.17.4. Use a new scratch directory for each collection.
 
-1. Run `python tools/build_map.py CHECKOUT COVERAGE_DIR dependencies.json.gz`. It records pytest contexts, file access and process-pool work under the originating test.
-2. Run `python tools/build_import_lines.py CHECKOUT COVERAGE_DIR import_lines.json.gz`. Lines executed before or between tests identify functions that can affect collection.
-3. Run `python tools/build_file_reads.py CHECKOUT FRESH_DIR dependencies.json.gz file_reads.json.gz`. Each test file gets a fresh interpreter and records the source and fixture paths its process tree opens.
+```sh
+python tools/build_map.py CHECKOUT COVERAGE_DIR dependencies.json.gz
+python tools/build_import_lines.py CHECKOUT COVERAGE_DIR import_lines.json.gz
+python tools/build_file_reads.py CHECKOUT MODULE_DIR dependencies.json.gz file_reads.json.gz
+python tools/build_item_reads.py CHECKOUT ITEM_DIR dependencies.json.gz item_profiles.json.gz
+python tools/build_observers.py CHECKOUT dependencies.json.gz observers.txt
+```
 
-The Docker build downloads Python source from the fixed upstream commit, verifies the content digest, and builds a read-only archive for parsing. The runtime uses the Python standard library.
+The first collector runs the suite, records line coverage and traces fixture reads in the parent and its process pool. The second extracts lines executed outside a test. The next two collectors start fresh interpreters for each test module and each individual test. The final collector finds measured contexts that inspect source locations or code objects.
+
+The Docker build downloads Python files from the pinned upstream source archive. It verifies their content digest before placing them in a read-only ZIP file for the selector. The runtime uses the Python standard library.
 
 ## Sources and license
 
-The entry code is released under MIT. The shipped maps come from executing the MIT-licensed SQLGlot source and its tests. SQLGlot is copyright its upstream contributors. The starter kit supplied the input/output protocol, image digest and scoring specification. The collectors use pytest, pytest-timeout, coverage.py and SQLGlot's test dependencies during development.
+The entry code is MIT-licensed. Its dependency maps come from running SQLGlot and its tests, which are also MIT-licensed. The starter kit supplied the input/output protocol, image digest and scoring specification. See LICENSE for the copyright notices.
